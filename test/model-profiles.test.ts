@@ -144,7 +144,7 @@ test("a new profile is stored, applied and widens the subagent allowlist", async
     subagents: { modelScope: { enforce: true, strict: true, allow: ["old/base"] } },
   });
   const run = session({
-    choices: ["＋ 新建 profile…", "p", "gpt-big", "p", "gpt-small"],
+    choices: ["+ New profile…", "p", "gpt-big", "p", "gpt-small"],
     confirmations: [true],
     inputs: ["gpt"],
   });
@@ -155,7 +155,7 @@ test("a new profile is stored, applied and widens the subagent allowlist", async
   });
   assert.deepEqual(run.current, { provider: "p", id: "gpt-big" });
   assert.deepEqual(JSON.parse(await read("settings.json")).subagents.modelScope.allow, ["old/base", "p/gpt-small"]);
-  assert.match(run.notices.at(-1) ?? "", /已新建并切换到 gpt/);
+  assert.match(run.notices.at(-1) ?? "", /Created and switched to gpt/);
 });
 
 test("switching an existing profile keeps the profile file untouched", async () => {
@@ -166,7 +166,7 @@ test("switching an existing profile keeps the profile file untouched", async () 
 
   assert.deepEqual(run.current, { provider: "p", id: "gpt-big" });
   assert.deepEqual(JSON.parse(await read("model-profiles.json")), store);
-  assert.match(run.notices.at(-1) ?? "", /已切换到 gpt/);
+  assert.match(run.notices.at(-1) ?? "", /Switched to gpt/);
 });
 
 test("a failed model switch changes nothing", async () => {
@@ -177,7 +177,7 @@ test("a failed model switch changes nothing", async () => {
 
   assert.deepEqual(run.current, { provider: "old", id: "base" });
   assert.deepEqual(JSON.parse(await read("model-profiles.json")), store);
-  assert.match(run.notices.at(-1) ?? "", /切换失败/);
+  assert.match(run.notices.at(-1) ?? "", /Switch failed/);
 
   const subagent: Record<string, unknown> = { agent: "scout" };
   await run.toolCall("subagent", subagent);
@@ -189,12 +189,12 @@ test("setting a default only updates the profile file", async () => {
     default: "gpt",
     profiles: { gpt: { sport: "p/gpt-big", eco: "p/gpt-small" }, deep: { sport: "q/deep-big", eco: "q/deep-big" } },
   });
-  const run = session({ choices: ["★ 设为默认 profile", "deep"] });
+  const run = session({ choices: ["★ Set as default profile", "deep"] });
   await run.execute();
 
   assert.equal(JSON.parse(await read("model-profiles.json")).default, "deep");
   assert.deepEqual(run.current, { provider: "old", id: "base" });
-  assert.match(run.notices.at(-1) ?? "", /新会话默认：deep/);
+  assert.match(run.notices.at(-1) ?? "", /New sessions now default to deep/);
 });
 
 test("a compact failure aborts the switch", async () => {
@@ -204,5 +204,5 @@ test("a compact failure aborts the switch", async () => {
   await run.execute();
 
   assert.deepEqual(run.current, { provider: "old", id: "base" });
-  assert.match(run.notices.at(-1) ?? "", /切换失败：quota/);
+  assert.match(run.notices.at(-1) ?? "", /Switch failed: quota/);
 });

@@ -29,8 +29,8 @@ The `default` profile is what a new session starts with. The file from the earli
 `/profiles` lists every profile, marks the default one, and offers two extra entries:
 
 - **Pick a profile** to switch the current session. You can compact with the old model first; the switch happens only if compaction succeeds.
-- **＋ 新建 profile…** asks for a provider and a model per tier, then for a profile name. Model names accept letters, digits, dots, underscores, and hyphens.
-- **★ 设为默认 profile** changes which profile new sessions start with.
+- **+ New profile…** asks for a provider and a model per tier, then for a profile name. Model names accept letters, digits, dots, underscores, and hyphens.
+- **★ Set as default profile** changes which profile new sessions start with.
 
 The command never writes `settings.json`, `web-search.json`, or any other package's configuration. The single exception is the pi-subagents allowlist described below.
 

@@ -11,8 +11,8 @@ type Config = Record<string, any>;
 type Profile = { sport: string; eco: string };
 type Profiles = Record<string, Profile>;
 
-const NEW_PROFILE = "＋ 新建 profile…";
-const SET_DEFAULT = "★ 设为默认 profile";
+const NEW_PROFILE = "+ New profile…";
+const SET_DEFAULT = "★ Set as default profile";
 
 function paths() {
   const agentDir = getAgentDir();
@@ -25,11 +25,11 @@ function paths() {
 async function load(path: string): Promise<Config> {
   try {
     const value = JSON.parse(await readFile(path, "utf8"));
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("需要 JSON 对象");
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("expected a JSON object");
     return value;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw new Error(`无法读取 ${path}: ${(error as Error).message}`);
+    throw new Error(`Cannot read ${path}: ${(error as Error).message}`);
   }
 }
 
@@ -67,12 +67,12 @@ function qualified(model: NonNullable<ExtensionContext["model"]>) {
 
 /** Apply a profile to the current session only: no global configuration is written. */
 async function activate(pi: ExtensionAPI, ctx: ExtensionContext, profile: Profile) {
-  if (await ctx.ui.confirm("先 compact？", "使用当前模型压缩会话，再切换 profile")) {
+  if (await ctx.ui.confirm("Compact first?", "Compress the session with the current model before switching profiles")) {
     await new Promise<void>((resolve, reject) => ctx.compact({ onComplete: () => resolve(), onError: reject }));
   }
   const model = findModel(ctx, profile.sport);
-  if (!model) throw new Error(`${profile.sport} 不在可用模型里`);
-  if (!await pi.setModel(model)) throw new Error(`无法切换到 ${profile.sport}，请检查 provider 认证`);
+  if (!model) throw new Error(`${profile.sport} is not an available model`);
+  if (!await pi.setModel(model)) throw new Error(`Cannot switch to ${profile.sport}; check the provider authentication`);
 }
 
 /**
@@ -92,7 +92,7 @@ async function syncScope(path: string, profiles: Profiles) {
 
 async function createProfile(ctx: ExtensionCommandContext, profiles: Profiles) {
   const models = ctx.modelRegistry.getAvailable();
-  if (!models.length) throw new Error("没有可用的模型 provider");
+  if (!models.length) throw new Error("No model provider is available");
   const providers = [...new Set(models.map((model) => model.provider))].sort();
   const pick = async (title: string, preferred?: string) => {
     const ordered = preferred && providers.includes(preferred)
@@ -105,20 +105,20 @@ async function createProfile(ctx: ExtensionCommandContext, profiles: Profiles) {
     if (!id) return undefined;
     return `${provider}/${id}`;
   };
-  const sport = await pick("Sport（主会话）");
+  const sport = await pick("Sport (main session)");
   if (!sport) return undefined;
-  const eco = await pick("Eco（子代理 / 工具）", providerOf(sport));
+  const eco = await pick("Eco (subagents and tools)", providerOf(sport));
   if (!eco) return undefined;
   const suggestion = `${providerOf(sport)}-${sport.slice(providerOf(sport).length + 1)}`;
   for (;;) {
-    const name = (await ctx.ui.input("profile 名", suggestion))?.trim();
+    const name = (await ctx.ui.input("Profile name", suggestion))?.trim();
     if (!name) return undefined;
     if (!/^[A-Za-z0-9._-]+$/.test(name)) {
-      ctx.ui.notify("名字只能包含字母、数字、点、下划线和连字符", "warning");
+      ctx.ui.notify("Use only letters, digits, dots, underscores, and hyphens", "warning");
       continue;
     }
     if (profiles[name]) {
-      ctx.ui.notify(`${name} 已存在`, "warning");
+      ctx.ui.notify(`${name} already exists`, "warning");
       continue;
     }
     return { name, profile: { sport, eco } };
@@ -166,7 +166,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("profiles", {
-    description: "切换 model profile（Sport 主会话 / Eco 子代理与工具）",
+    description: "Switch the model profile (Sport for the main session, Eco for subagents and tools)",
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) return;
       const files = paths();
@@ -174,7 +174,7 @@ export default function (pi: ExtensionAPI) {
         try {
           await syncScope(files.settings, profiles);
         } catch (error) {
-          ctx.ui.notify(`modelScope 白名单未更新：${(error as Error).message}`, "warning");
+          ctx.ui.notify(`modelScope allowlist not updated: ${(error as Error).message}`, "warning");
         }
       };
       try {
@@ -182,16 +182,16 @@ export default function (pi: ExtensionAPI) {
         const profiles = profilesOf(store);
         const names = Object.keys(profiles).sort();
         const labels = names.map((name) => (name === store.default ? `${name} (default)` : name));
-        const chosen = await ctx.ui.select("选择 model profile", [...labels, NEW_PROFILE, SET_DEFAULT]);
+        const chosen = await ctx.ui.select("Select a model profile", [...labels, NEW_PROFILE, SET_DEFAULT]);
         if (!chosen) return;
 
         if (chosen === SET_DEFAULT) {
-          if (!names.length) throw new Error("还没有 profile，先新建一个");
-          const target = await ctx.ui.select("设为默认（新会话）", labels);
+          if (!names.length) throw new Error("No profile yet; create one first");
+          const target = await ctx.ui.select("Set as default for new sessions", labels);
           if (!target) return;
           const name = names[labels.indexOf(target)];
           await save(files.profiles, { ...store, default: name });
-          ctx.ui.notify(`新会话默认：${name}`, "info");
+          ctx.ui.notify(`New sessions now default to ${name}`, "info");
           return;
         }
 
@@ -208,7 +208,7 @@ export default function (pi: ExtensionAPI) {
           }
           active = created.profile;
           await widenScope({ ...profiles, [created.name]: created.profile });
-          ctx.ui.notify(`已新建并切换到 ${created.name}`, "info");
+          ctx.ui.notify(`Created and switched to ${created.name}`, "info");
           return;
         }
 
@@ -218,9 +218,9 @@ export default function (pi: ExtensionAPI) {
         await activate(pi, ctx, profile);
         active = profile;
         await widenScope(profiles);
-        ctx.ui.notify(`已切换到 ${name}`, "info");
+        ctx.ui.notify(`Switched to ${name}`, "info");
       } catch (error) {
-        ctx.ui.notify(`切换失败：${(error as Error).message}`, "error");
+        ctx.ui.notify(`Switch failed: ${(error as Error).message}`, "error");
       }
     },
   });
