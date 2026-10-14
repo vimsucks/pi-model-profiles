@@ -50,6 +50,7 @@ function session(options: {
   const confirmations = [...(options.confirmations ?? [])];
   const inputs = [...(options.inputs ?? [])];
   const prompts: string[][] = [];
+  const confirmationPrompts: string[] = [];
   const notices: string[] = [];
   let handler: Function | undefined;
   let current = options.current ?? { provider: "old", id: "base" };
@@ -85,7 +86,7 @@ function session(options: {
     },
     ui: {
       select: async (_title: string, options: string[]) => { prompts.push(options); return choices.shift(); },
-      confirm: async () => confirmations.shift() ?? false,
+      confirm: async (title: string) => { confirmationPrompts.push(title); return confirmations.shift() ?? false; },
       input: async () => inputs.shift(),
       notify: (message: string) => { notices.push(message); },
     },
@@ -98,6 +99,7 @@ function session(options: {
     hooks,
     ctx,
     prompts,
+    confirmationPrompts,
     notices,
     start: (reason = "startup") => hooks.session_start({ reason }, ctx),
     toolCall: (toolName: string, input: Record<string, unknown>) => hooks.tool_call({ toolName, input }, ctx),
@@ -153,7 +155,7 @@ test("a new profile is stored, applied and widens the subagent allowlist", async
   const run = session({
     branch,
     choices: ["+ New profile…", "p", "gpt-big", "p", "gpt-small"],
-    confirmations: [true],
+    confirmations: [true, true],
     inputs: ["gpt"],
   });
   await run.execute();
@@ -164,6 +166,7 @@ test("a new profile is stored, applied and widens the subagent allowlist", async
   assert.deepEqual(run.current, { provider: "p", id: "gpt-big" });
   assert.deepEqual(JSON.parse(await read("settings.json")).subagents.modelScope.allow, ["old/base", "p/gpt-small"]);
   assert.match(run.notices.at(-1) ?? "", /Created and switched to gpt/);
+  assert.deepEqual(run.confirmationPrompts, ["Switch to this profile now?", "Compact first?"]);
   const reloaded = session({ branch, current: run.current });
   await reloaded.start("reload");
   const subagent: Record<string, unknown> = {};
@@ -294,4 +297,28 @@ test("a default profile snapshot survives reload after its shared definition is 
   const subagent: Record<string, unknown> = {};
   await restored.toolCall("subagent", subagent);
   assert.equal(subagent.model, "p/gpt-small");
+});
+
+
+test("creating a profile without switching preserves the current model and Eco", async () => {
+  await write("model-profiles.json", {
+    default: "gpt",
+    profiles: { gpt: { sport: "p/gpt-big", eco: "p/gpt-small" } },
+  });
+  const run = session({
+    choices: ["+ New profile…", "q", "deep-big", "q", "deep-big"],
+    confirmations: [false],
+    inputs: ["deep"],
+  });
+  await run.start();
+  await run.execute();
+  const store = JSON.parse(await read("model-profiles.json"));
+  assert.deepEqual(store.profiles.deep, { sport: "q/deep-big", eco: "q/deep-big" });
+  assert.equal(store.default, "gpt");
+  assert.deepEqual(run.current, { provider: "p", id: "gpt-big" });
+  const subagent: Record<string, unknown> = {};
+  await run.toolCall("subagent", subagent);
+  assert.equal(subagent.model, "p/gpt-small");
+  assert.deepEqual(run.confirmationPrompts, ["Switch to this profile now?"]);
+  assert.equal(run.notices.at(-1), "Created profile deep");
 });

@@ -218,17 +218,18 @@ export default function (pi: ExtensionAPI) {
         if (chosen === NEW_PROFILE) {
           const created = await createProfile(ctx, profiles);
           if (!created) return;
+          const switchNow = await ctx.ui.confirm("Switch to this profile now?", created.name);
           const before = ctx.model;
-          await activate(pi, ctx, created.profile);
+          if (switchNow) await activate(pi, ctx, created.profile);
           try {
             await save(files.profiles, { ...store, profiles: { ...profiles, [created.name]: created.profile } });
           } catch (error) {
-            if (before) await pi.setModel(before);
+            if (switchNow && before) await pi.setModel(before);
             throw error;
           }
-          remember(created.name, created.profile);
+          if (switchNow) remember(created.name, created.profile);
           await widenScope({ ...profiles, [created.name]: created.profile });
-          ctx.ui.notify(`Created and switched to ${created.name}`, "info");
+          ctx.ui.notify(switchNow ? `Created and switched to ${created.name}` : `Created profile ${created.name}`, "info");
           return;
         }
 

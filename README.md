@@ -29,7 +29,7 @@ The `default` profile is what a new session starts with. The file from the earli
 `/profiles` lists every profile, marks the default one, and offers two extra entries:
 
 - **Pick a profile** to switch the current session. You can compact with the old model first; the switch happens only if compaction succeeds.
-- **+ New profile…** asks for a provider and a model per tier, then for a profile name. Model names accept letters, digits, dots, underscores, and hyphens.
+- **+ New profile…** asks for a provider and a model per tier, then for a profile name. Profile names accept letters, digits, dots, underscores, and hyphens. It then asks whether to switch immediately. Choosing No saves the profile without changing the current model or Eco selection and does not offer compaction.
 - **★ Set as default profile** changes which profile new sessions start with.
 
 The command never writes `settings.json`, `web-search.json`, or any other package's configuration. The single exception is the pi-subagents allowlist described below.
