@@ -1,26 +1,24 @@
-import { existsSync } from "node:fs";
 import { readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
-import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  getAgentDir,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 type Config = Record<string, any>;
-type Preset = { sport: string; eco: string };
+type Profile = { sport: string; eco: string };
+type Profiles = Record<string, Profile>;
+
+const NEW_PROFILE = "＋ 新建 profile…";
+const SET_DEFAULT = "★ 设为默认 profile";
 
 function paths() {
   const agentDir = getAgentDir();
-  const legacyDir = join(homedir(), CONFIG_DIR_NAME);
-  const xdgDir = process.env.XDG_CONFIG_HOME && join(process.env.XDG_CONFIG_HOME, "pi");
-  const webDir = process.env.PI_CODING_AGENT_DIR
-    ? agentDir
-    : xdgDir
-      ? (existsSync(join(xdgDir, "web-search.json")) ? xdgDir : existsSync(join(legacyDir, "web-search.json")) ? legacyDir : xdgDir)
-      : existsSync(join(agentDir, "web-search.json")) ? agentDir : existsSync(join(legacyDir, "web-search.json")) ? legacyDir : agentDir;
   return {
     settings: join(agentDir, "settings.json"),
-    presets: join(agentDir, "switch-provider.json"),
-    web: join(webDir, "web-search.json"),
-    autoname: join(agentDir, "pi-autoname.json"),
+    profiles: join(agentDir, "model-profiles.json"),
   };
 }
 
@@ -46,127 +44,181 @@ async function save(path: string, value: Config) {
   }
 }
 
-function qualified(provider: string, id: string) {
-  return `${provider}/${id}`;
+function profilesOf(store: Config): Profiles {
+  const value = store.profiles;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Profiles;
 }
 
-function hasPackage(configs: Config[], name: string) {
-  return configs.some((config) => Array.isArray(config.packages) && config.packages.some((entry: unknown) => {
-    const source = typeof entry === "string"
-      ? entry
-      : entry && typeof entry === "object" && typeof (entry as Config).source === "string"
-        ? (entry as Config).source
-        : "";
-    if (!source.startsWith(`npm:${name}`)) return false;
-    const suffix = source.slice(`npm:${name}`.length);
-    return suffix === "" || suffix.startsWith("@");
-  }));
+function providerOf(reference: string) {
+  const index = reference.indexOf("/");
+  return index > 0 ? reference.slice(0, index) : "";
+}
+
+function findModel(ctx: ExtensionContext, reference: string) {
+  const provider = providerOf(reference);
+  if (!provider) return undefined;
+  return ctx.modelRegistry.find(provider, reference.slice(provider.length + 1));
+}
+
+function qualified(model: NonNullable<ExtensionContext["model"]>) {
+  return `${model.provider}/${model.id}`;
+}
+
+/** Apply a profile to the current session only: no global configuration is written. */
+async function activate(pi: ExtensionAPI, ctx: ExtensionContext, profile: Profile) {
+  if (await ctx.ui.confirm("先 compact？", "使用当前模型压缩会话，再切换 profile")) {
+    await new Promise<void>((resolve, reject) => ctx.compact({ onComplete: () => resolve(), onError: reject }));
+  }
+  const model = findModel(ctx, profile.sport);
+  if (!model) throw new Error(`${profile.sport} 不在可用模型里`);
+  if (!await pi.setModel(model)) throw new Error(`无法切换到 ${profile.sport}，请检查 provider 认证`);
+}
+
+/**
+ * Widen the pi-subagents model allowlist to cover every profile's Eco model.
+ * The list only grows: it grants permission, it never selects a model.
+ */
+async function syncScope(path: string, profiles: Profiles) {
+  const settings = await load(path);
+  const subagents = settings.subagents;
+  const scope = subagents?.modelScope;
+  if (!scope || typeof scope !== "object" || scope.enforce !== true) return;
+  const allow = Array.isArray(scope.allow) ? scope.allow.filter((entry: unknown): entry is string => typeof entry === "string") : [];
+  const wanted = [...new Set([...allow, ...Object.values(profiles).map((profile) => profile.eco)])];
+  if (wanted.length === allow.length) return;
+  await save(path, { ...settings, subagents: { ...subagents, modelScope: { ...scope, allow: wanted } } });
+}
+
+async function createProfile(ctx: ExtensionCommandContext, profiles: Profiles) {
+  const models = ctx.modelRegistry.getAvailable();
+  if (!models.length) throw new Error("没有可用的模型 provider");
+  const providers = [...new Set(models.map((model) => model.provider))].sort();
+  const pick = async (title: string, preferred?: string) => {
+    const ordered = preferred && providers.includes(preferred)
+      ? [preferred, ...providers.filter((provider) => provider !== preferred)]
+      : providers;
+    const provider = await ctx.ui.select(`${title} · provider`, ordered);
+    if (!provider) return undefined;
+    const ids = models.filter((model) => model.provider === provider).map((model) => model.id).sort();
+    const id = await ctx.ui.select(`${title} · ${provider}`, ids);
+    if (!id) return undefined;
+    return `${provider}/${id}`;
+  };
+  const sport = await pick("Sport（主会话）");
+  if (!sport) return undefined;
+  const eco = await pick("Eco（子代理 / 工具）", providerOf(sport));
+  if (!eco) return undefined;
+  const suggestion = `${providerOf(sport)}-${sport.slice(providerOf(sport).length + 1)}`;
+  for (;;) {
+    const name = (await ctx.ui.input("profile 名", suggestion))?.trim();
+    if (!name) return undefined;
+    if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+      ctx.ui.notify("名字只能包含字母、数字、点、下划线和连字符", "warning");
+      continue;
+    }
+    if (profiles[name]) {
+      ctx.ui.notify(`${name} 已存在`, "warning");
+      continue;
+    }
+    return { name, profile: { sport, eco } };
+  }
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on("before_agent_start", async (event, ctx) => {
-    if (!pi.getActiveTools().includes("subagent")) return;
-    const files = paths();
-    const [settings, projectSettings, presets] = await Promise.all([
-      load(files.settings),
-      load(join(ctx.cwd, ".pi", "settings.json")),
-      load(files.presets),
-    ]);
-    if (!hasPackage([settings, projectSettings], "@gotgenes/pi-subagents")) return;
-    const provider = settings.defaultProvider;
-    const eco = typeof provider === "string" ? presets[provider]?.eco : undefined;
-    if (typeof eco !== "string" || !eco) return;
-    event.systemPromptOptions.promptGuidelines.push(
-      `When calling the Gotgenes subagent tool, pass model: "${qualified(provider, eco)}" unless the user explicitly requested another model. Respect an agent that locks its model.`,
-    );
+  // The session's active profile. It is intentionally in-memory: switching
+  // never writes shared configuration, so other sessions keep their models.
+  let active: Profile | undefined;
+
+  pi.on("session_start", async (event, ctx) => {
+    if (event.reason !== "startup" && event.reason !== "new") return;
+    try {
+      const files = paths();
+      const store = await load(files.profiles);
+      const name = typeof store.default === "string" ? store.default : "";
+      const profile = profilesOf(store)[name];
+      if (!profile) return;
+      active = profile;
+      const settings = pi.getSettings();
+      const configured = typeof settings.defaultProvider === "string" && typeof settings.defaultModel === "string"
+        ? `${settings.defaultProvider}/${settings.defaultModel}`
+        : "";
+      const current = ctx.model ? qualified(ctx.model) : "";
+      // A different current model means an explicit override such as `--model`.
+      if (configured && current && current !== configured) return;
+      const model = findModel(ctx, profile.sport);
+      if (model) await pi.setModel(model);
+    } catch {
+      // A broken profile file must not break session startup.
+    }
   });
 
-  pi.registerCommand("providers", {
-    description: "切换 provider 的 Sport/Eco 模型预设",
+  pi.on("tool_call", (event) => {
+    if (!active) return;
+    const input = event.input as unknown as Config;
+    if (event.toolName === "subagent") {
+      if (!input.model) input.model = active.eco;
+      return;
+    }
+    if (event.toolName === "fetch_content" && input.mode === "answer" && !input.answerModel) {
+      input.answerModel = active.eco;
+    }
+  });
+
+  pi.registerCommand("profiles", {
+    description: "切换 model profile（Sport 主会话 / Eco 子代理与工具）",
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) return;
       const files = paths();
-      try {
-        const [settings, projectSettings, web, presets] = await Promise.all([
-          load(files.settings),
-          load(join(ctx.cwd, ".pi", "settings.json")),
-          load(files.web),
-          load(files.presets),
-        ]);
-        const hasNicoSubagents = hasPackage([settings, projectSettings], "pi-subagents");
-        const autoname = existsSync(files.autoname) ? await load(files.autoname) : undefined;
-        const models = ctx.modelRegistry.getAvailable();
-        const providers = [...new Set(models.map((model) => model.provider))].sort();
-        if (!providers.length) throw new Error("没有可用的模型 provider");
-
-        const current = settings.defaultProvider;
-        const provider = await ctx.ui.select("选择 provider", [current, ...providers].filter((id, index, all) => id && all.indexOf(id) === index));
-        if (!provider) return;
-        const available = models.filter((model) => model.provider === provider);
-        if (!available.length) throw new Error(`${provider} 没有可用模型`);
-        const ids = available.map((model) => model.id).sort();
-        const saved: Preset | undefined = presets[provider];
-        const pick = async (tier: "sport" | "eco", fallback: string | undefined) => {
-          const preferred = saved?.[tier] ?? fallback;
-          const options = [preferred, ...ids].filter((id, index, all): id is string => !!id && ids.includes(id) && all.indexOf(id) === index);
-          return ctx.ui.select(`${tier === "sport" ? "Sport (Pi)" : "Eco (subagent / webaccess)"} · ${provider}`, options);
-        };
-        const sport = await pick("sport", provider === current ? settings.defaultModel : undefined);
-        if (!sport) return;
-        const oldEco = hasNicoSubagents && typeof settings.subagents?.defaultModel === "string" ? settings.subagents.defaultModel : "";
-        const eco = await pick("eco", oldEco.startsWith(`${provider}/`) ? oldEco.slice(provider.length + 1) : undefined);
-        if (!eco) return;
-        const reload = await ctx.ui.confirm("切换后 reload？", `${provider}: Sport ${sport} / Eco ${eco}`);
-        const compact = reload && await ctx.ui.confirm("先 compact？", "使用当前 provider 压缩会话，再切换模型并 reload");
-        if (compact) {
-          await new Promise<void>((resolve, reject) => ctx.compact({ onComplete: () => resolve(), onError: reject }));
-        }
-
-        const nextSettings: Config = {
-          ...settings,
-          defaultProvider: provider,
-          defaultModel: sport,
-          ...(hasNicoSubagents ? {
-            subagents: {
-              ...settings.subagents,
-              defaultModel: qualified(provider, eco),
-              modelScope: { ...settings.subagents?.modelScope, enforce: true, strict: true, allow: [qualified(provider, eco)] },
-            },
-          } : {}),
-        };
-        const changes: [string, Config, Config][] = [
-          [files.settings, nextSettings, settings],
-          [files.web, {
-            ...web,
-            summaryModel: qualified(provider, eco),
-            ...(typeof web.fetch?.answerProvider === "string" && typeof web.fetch?.answerModel === "string"
-              ? { fetch: { ...web.fetch, answerProvider: provider, answerModel: eco } }
-              : {}),
-          }, web],
-          [files.presets, { ...presets, [provider]: { sport, eco } }, presets],
-        ];
-        if (autoname) {
-          changes.push([files.autoname, { ...autoname, model: qualified(provider, eco) }, autoname]);
-        }
-        const original = ctx.model;
-        const selected = ctx.modelRegistry.find(provider, sport);
-        if (!selected || !await pi.setModel(selected)) throw new Error("无法切换当前会话模型，请检查 provider 认证");
-        const written: [string, Config][] = [];
+      const widenScope = async (profiles: Profiles) => {
         try {
-          for (const [path, value, before] of changes) {
-            await save(path, value);
-            written.push([path, before]);
-          }
+          await syncScope(files.settings, profiles);
         } catch (error) {
-          for (const [path, before] of written.reverse()) await save(path, before);
-          if (original) await pi.setModel(original);
-          throw error;
+          ctx.ui.notify(`modelScope 白名单未更新：${(error as Error).message}`, "warning");
         }
-        if (reload) {
-          await ctx.reload();
+      };
+      try {
+        const store = await load(files.profiles);
+        const profiles = profilesOf(store);
+        const names = Object.keys(profiles).sort();
+        const labels = names.map((name) => (name === store.default ? `${name} (default)` : name));
+        const chosen = await ctx.ui.select("选择 model profile", [...labels, NEW_PROFILE, SET_DEFAULT]);
+        if (!chosen) return;
+
+        if (chosen === SET_DEFAULT) {
+          if (!names.length) throw new Error("还没有 profile，先新建一个");
+          const target = await ctx.ui.select("设为默认（新会话）", labels);
+          if (!target) return;
+          const name = names[labels.indexOf(target)];
+          await save(files.profiles, { ...store, default: name });
+          ctx.ui.notify(`新会话默认：${name}`, "info");
           return;
         }
-        ctx.ui.notify("已切换；webaccess 等扩展可能需要 /reload 才会读取新配置", "info");
+
+        if (chosen === NEW_PROFILE) {
+          const created = await createProfile(ctx, profiles);
+          if (!created) return;
+          const before = ctx.model;
+          await activate(pi, ctx, created.profile);
+          try {
+            await save(files.profiles, { ...store, profiles: { ...profiles, [created.name]: created.profile } });
+          } catch (error) {
+            if (before) await pi.setModel(before);
+            throw error;
+          }
+          active = created.profile;
+          await widenScope({ ...profiles, [created.name]: created.profile });
+          ctx.ui.notify(`已新建并切换到 ${created.name}`, "info");
+          return;
+        }
+
+        const name = names[labels.indexOf(chosen)];
+        const profile = profiles[name];
+        if (!profile) return;
+        await activate(pi, ctx, profile);
+        active = profile;
+        await widenScope(profiles);
+        ctx.ui.notify(`已切换到 ${name}`, "info");
       } catch (error) {
         ctx.ui.notify(`切换失败：${(error as Error).message}`, "error");
       }

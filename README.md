@@ -1,25 +1,55 @@
 # pi-model-profiles
 
-Switching providers in a shared Pi setup easily misses the subagent or extension models that are pinned elsewhere. This extension adds `/providers`, which remembers two model tiers per provider: Sport for the main Pi session and Eco for cost-sensitive callers.
+One provider often serves several model families, and Pi's model choices are spread across separate files: the Pi default, pi-subagents, pi-web-access, and session naming. This extension groups them into named profiles with two tiers each — **Sport** for the main session and **Eco** for subagents and tools — and switches between profiles without writing shared configuration, so other sessions keep their own models.
 
-Install the package, run `/reload` once, then run `/providers`.
+Install the package, run `/reload` once, then run `/profiles`.
 
 ```bash
 pi install git:github.com/vimsucks/pi-model-profiles
 ```
 
-The command first asks for a provider, then for the Sport and Eco models. Models you already picked for that provider come first. A new choice becomes the preset for the next time. Pressing Esc exits without changing configuration. Both tiers may use the same model.
+## Profiles
 
-Sport updates the Pi default model and the current session model. When [pi-subagents](https://pi.dev/packages/pi-subagents) is installed, Eco is written to its `defaultModel`, and the strict `modelScope.allow` list is narrowed to that model. Subagents that pin a model in their agent file or call arguments keep their own rules and the strict allowlist may reject them; adjust those agents separately.
+Profiles live in `~/.pi/agent/model-profiles.json`. Every tier holds a fully qualified `provider/id`, so one profile can mix providers:
 
-When [@gotgenes/pi-subagents](https://pi.dev/packages/@gotgenes/pi-subagents) is installed and the current provider already has an Eco preset, the extension tells the parent agent to pass that Eco model to the `subagent` tool. An explicit user choice wins, and an agent that locks its model is respected. Gotgenes has no global subagent default model, so this is a model-call instruction rather than a runtime restriction; other extensions that call `SubagentsService` directly are not covered. Nothing is injected until `/providers` has run, and stale Nico configuration left after an uninstall is ignored.
+```json
+{
+  "default": "profile-1-gpt",
+  "profiles": {
+    "profile-1-gpt": { "sport": "cliproxyapi/gpt-6.1-sol", "eco": "cliproxyapi/gpt-6-luna" },
+    "profile-2-deepseek": { "sport": "opencode-go/deepseek-v4.1-pro", "eco": "opencode-go/deepseek-v4.1-flash" }
+  }
+}
+```
 
-[pi-web-access](https://pi.dev/packages/pi-web-access) `summaryModel` also switches to Eco for search-result summaries and Curator drafts. When `fetch.answerProvider` and `fetch.answerModel` are configured, both change to Eco for `fetch_content` answer mode. Without a pinned answer model, the command adds no answer configuration and answer mode keeps using the current Pi model by its own rules. Search services, video understanding, and PDF extraction keep their own service choices, and an explicit `answerModel` on a tool call is unaffected.
+The `default` profile is what a new session starts with. The file from the earlier `pi-switch-provider` package (`switch-provider.json`) is not read and can be deleted.
 
-When pi-autoname is installed and `~/.pi/agent/pi-autoname.json` exists, the command also sets its `model` to Eco and keeps `fallbackModels`. The extension names sessions with that model, which was easy to leave on the old provider after switching.
+## Command
 
-After picking models you can choose to `/reload`. If you reload, you can also compact with the old model first. The switch happens only after compaction succeeds, which reduces the context carried into the first request on another provider; compaction itself costs a model call. Cancelling, a failed compaction, and missing authentication for the new provider save no configuration. Without a reload, the current Pi session switches immediately, and extensions that re-read configuration may need a manual `/reload` later.
+`/profiles` lists every profile, marks the default one, and offers two extra entries:
 
-Presets live in `~/.pi/agent/switch-provider.json`. The original Pi, subagent, and webaccess configuration stays in its own files, and the command updates them together. Other extensions that pin their own text model need separate handling for their own configuration format. Image models, Fusion multi-model tasks, and explicitly pinned run models do not follow Sport/Eco.
+- **Pick a profile** to switch the current session. You can compact with the old model first; the switch happens only if compaction succeeds.
+- **＋ 新建 profile…** asks for a provider and a model per tier, then for a profile name. Model names accept letters, digits, dots, underscores, and hyphens.
+- **★ 设为默认 profile** changes which profile new sessions start with.
 
-Run `pnpm test` in the repository to check the switch, cancel, and failure paths.
+The command never writes `settings.json`, `web-search.json`, or any other package's configuration. The single exception is the pi-subagents allowlist described below.
+
+## Session behavior
+
+- On `session_start` for a new or initial session, the default profile is applied through `pi.setModel()`. A starting model that differs from the configured default means an explicit override such as `--model`, and the extension leaves it alone.
+- On `tool_call`, a `subagent` call without a `model` gets the Eco model, and a `fetch_content` call in `answer` mode without `answerModel` gets the Eco model. An explicit model on the call always wins.
+- Session naming, pi-background-tasks, and the Pi status line read the current session model, so they follow the profile without any extra configuration.
+
+## Boundary
+
+- pi-subagents paths that do not go through the `subagent` tool — the `/run` command, schedules, and background runs — keep the global `subagents.defaultModel`.
+- pi-web-access summaries are generated inside the `search` tool, before any tool event fires. There is no session-level channel for `summaryModel`, so it keeps its configured value.
+- Image models, Fusion multi-model tasks, and explicitly pinned run models do not follow a profile.
+
+## pi-subagents allowlist
+
+An enforced `subagents.modelScope` rejects models outside its `allow` list, which would block an Eco model from another provider. When `subagents.modelScope.enforce` is `true`, the extension widens `allow` to cover every profile's Eco model. The list only grows: it grants permission and never selects a model.
+
+## Development
+
+Run `pnpm test` in the repository to check switching, session startup, injection, and failure paths.
