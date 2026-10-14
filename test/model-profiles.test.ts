@@ -43,6 +43,7 @@ function session(options: {
   current?: { provider: string; id: string };
   auth?: boolean;
   compactError?: Error;
+  branch?: { type: string; customType?: string; data?: unknown }[];
 } = {}) {
   const hooks: Record<string, Function> = {};
   const choices = [...(options.choices ?? [])];
@@ -53,10 +54,14 @@ function session(options: {
   let handler: Function | undefined;
   let current = options.current ?? { provider: "old", id: "base" };
   const settings = options.settings ?? { defaultProvider: "old", defaultModel: "base" };
+  const branch = options.branch ?? [];
 
   const pi = {
     on: (event: string, hook: Function) => { hooks[event] = hook; },
     getSettings: () => settings,
+    appendEntry: (customType: string, data: unknown) => {
+      branch.push({ type: "custom", customType, data: structuredClone(data) });
+    },
     registerCommand: (name: string, command: { handler: Function }) => {
       assert.equal(name, "profiles");
       handler = command.handler;
@@ -72,6 +77,7 @@ function session(options: {
   const ctx = {
     cwd: dir,
     hasUI: true,
+    sessionManager: { getBranch: () => branch },
     get model() { return current; },
     modelRegistry: {
       getAvailable: () => MODELS,
@@ -137,6 +143,7 @@ test("tool calls use the Eco model of the active profile", async () => {
 });
 
 test("a new profile is stored, applied and widens the subagent allowlist", async () => {
+  const branch: { type: string; customType?: string; data?: unknown }[] = [];
   await write("model-profiles.json", {});
   await write("settings.json", {
     defaultProvider: "old",
@@ -144,6 +151,7 @@ test("a new profile is stored, applied and widens the subagent allowlist", async
     subagents: { modelScope: { enforce: true, strict: true, allow: ["old/base"] } },
   });
   const run = session({
+    branch,
     choices: ["+ New profile…", "p", "gpt-big", "p", "gpt-small"],
     confirmations: [true],
     inputs: ["gpt"],
@@ -156,6 +164,11 @@ test("a new profile is stored, applied and widens the subagent allowlist", async
   assert.deepEqual(run.current, { provider: "p", id: "gpt-big" });
   assert.deepEqual(JSON.parse(await read("settings.json")).subagents.modelScope.allow, ["old/base", "p/gpt-small"]);
   assert.match(run.notices.at(-1) ?? "", /Created and switched to gpt/);
+  const reloaded = session({ branch, current: run.current });
+  await reloaded.start("reload");
+  const subagent: Record<string, unknown> = {};
+  await reloaded.toolCall("subagent", subagent);
+  assert.equal(subagent.model, "p/gpt-small");
 });
 
 test("switching an existing profile keeps the profile file untouched", async () => {
@@ -205,4 +218,80 @@ test("a compact failure aborts the switch", async () => {
 
   assert.deepEqual(run.current, { provider: "old", id: "base" });
   assert.match(run.notices.at(-1) ?? "", /Switch failed: quota/);
+});
+
+
+test("reload restores the selected Eco snapshot without changing the current model", async () => {
+  const branch: { type: string; customType?: string; data?: unknown }[] = [];
+  await write("model-profiles.json", {
+    default: "deep",
+    profiles: {
+      gpt: { sport: "p/gpt-big", eco: "p/gpt-small" },
+      deep: { sport: "q/deep-big", eco: "q/deep-big" },
+    },
+  });
+  const first = session({ branch, choices: ["gpt"] });
+  await first.execute();
+  // Editing or deleting the shared profile must not change a saved session.
+  await write("model-profiles.json", { default: "deep", profiles: {} });
+  const reloaded = session({ branch, current: { provider: "q", id: "deep-big" } });
+  await reloaded.start("reload");
+  const subagent: Record<string, unknown> = { agent: "delegate" };
+  await reloaded.toolCall("subagent", subagent);
+  assert.equal(subagent.model, "p/gpt-small");
+  assert.deepEqual(reloaded.current, { provider: "q", id: "deep-big" });
+  const answer: Record<string, unknown> = { mode: "answer" };
+  await reloaded.toolCall("fetch_content", answer);
+  assert.equal(answer.answerModel, "p/gpt-small");
+});
+
+
+test("restoration uses the latest valid profile on the active branch", async () => {
+  const branch = [
+    { type: "custom", customType: "model-profile", data: { name: "gpt", sport: "p/gpt-big", eco: "p/gpt-small" } },
+    { type: "custom", customType: "other-extension", data: { eco: "old/base" } },
+    { type: "custom", customType: "model-profile", data: { name: "deep", sport: "q/deep-big", eco: "q/deep-big" } },
+    { type: "custom", customType: "model-profile", data: { name: "broken", sport: "p/", eco: 42 } },
+  ];
+  for (const reason of ["startup", "reload", "resume", "fork"]) {
+    const restored = session({ branch, current: { provider: "p", id: "gpt-big" } });
+    await restored.start(reason);
+    const subagent: Record<string, unknown> = {};
+    await restored.toolCall("subagent", subagent);
+    assert.equal(subagent.model, "q/deep-big");
+    assert.deepEqual(restored.current, { provider: "p", id: "gpt-big" });
+  }
+});
+
+test("switching sessions and branches clears stale profile state", async () => {
+  const branch = [
+    { type: "custom", customType: "model-profile", data: { name: "gpt", sport: "p/gpt-big", eco: "p/gpt-small" } },
+  ];
+  const run = session({ branch });
+  await run.start("resume");
+  branch.length = 0;
+  await run.hooks.session_tree({}, run.ctx);
+  const afterTree: Record<string, unknown> = {};
+  await run.toolCall("subagent", afterTree);
+  assert.equal(afterTree.model, undefined);
+  branch.push({ type: "custom", customType: "model-profile", data: { name: "gpt", sport: "p/gpt-big", eco: "p/gpt-small" } });
+  await run.hooks.session_tree({}, run.ctx);
+  branch.length = 0;
+  await run.start("new");
+  const afterNew: Record<string, unknown> = {};
+  await run.toolCall("subagent", afterNew);
+  assert.equal(afterNew.model, undefined);
+});
+
+test("a default profile snapshot survives reload after its shared definition is deleted", async () => {
+  const branch: { type: string; customType?: string; data?: unknown }[] = [];
+  await write("model-profiles.json", { default: "gpt", profiles: { gpt: { sport: "p/gpt-big", eco: "p/gpt-small" } } });
+  const first = session({ branch });
+  await first.start();
+  await rm(join(dir, "model-profiles.json"));
+  const restored = session({ branch, current: first.current });
+  await restored.start("reload");
+  const subagent: Record<string, unknown> = {};
+  await restored.toolCall("subagent", subagent);
+  assert.equal(subagent.model, "p/gpt-small");
 });

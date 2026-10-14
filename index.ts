@@ -126,28 +126,48 @@ async function createProfile(ctx: ExtensionCommandContext, profiles: Profiles) {
 }
 
 export default function (pi: ExtensionAPI) {
-  // The session's active profile. It is intentionally in-memory: switching
-  // never writes shared configuration, so other sessions keep their models.
   let active: Profile | undefined;
 
+  const remember = (name: string, profile: Profile) => {
+    pi.appendEntry("model-profile", { name, sport: profile.sport, eco: profile.eco });
+    active = { ...profile };
+  };
+
+  const restore = (ctx: ExtensionContext) => {
+    active = undefined;
+    for (const entry of ctx.sessionManager.getBranch().slice().reverse()) {
+      if (entry.type !== "custom" || entry.customType !== "model-profile") continue;
+      const data = entry.data as { name?: unknown; sport?: unknown; eco?: unknown } | undefined;
+      if (!data || typeof data.name !== "string" || !data.name ||
+          typeof data.sport !== "string" || !providerOf(data.sport) || data.sport.endsWith("/") ||
+          typeof data.eco !== "string" || !providerOf(data.eco) || data.eco.endsWith("/")) continue;
+      active = { sport: data.sport, eco: data.eco };
+      break;
+    }
+  };
+
+  pi.on("session_tree", (_event, ctx) => restore(ctx));
   pi.on("session_start", async (event, ctx) => {
-    if (event.reason !== "startup" && event.reason !== "new") return;
+    restore(ctx);
+    if (active || (event.reason !== "startup" && event.reason !== "new")) return;
     try {
       const files = paths();
       const store = await load(files.profiles);
       const name = typeof store.default === "string" ? store.default : "";
       const profile = profilesOf(store)[name];
       if (!profile) return;
-      active = profile;
       const settings = pi.getSettings();
       const configured = typeof settings.defaultProvider === "string" && typeof settings.defaultModel === "string"
         ? `${settings.defaultProvider}/${settings.defaultModel}`
         : "";
       const current = ctx.model ? qualified(ctx.model) : "";
       // A different current model means an explicit override such as `--model`.
-      if (configured && current && current !== configured) return;
+      if (configured && current && current !== configured) {
+        remember(name, profile);
+        return;
+      }
       const model = findModel(ctx, profile.sport);
-      if (model) await pi.setModel(model);
+      if (model && await pi.setModel(model)) remember(name, profile);
     } catch {
       // A broken profile file must not break session startup.
     }
@@ -206,7 +226,7 @@ export default function (pi: ExtensionAPI) {
             if (before) await pi.setModel(before);
             throw error;
           }
-          active = created.profile;
+          remember(created.name, created.profile);
           await widenScope({ ...profiles, [created.name]: created.profile });
           ctx.ui.notify(`Created and switched to ${created.name}`, "info");
           return;
@@ -216,7 +236,7 @@ export default function (pi: ExtensionAPI) {
         const profile = profiles[name];
         if (!profile) return;
         await activate(pi, ctx, profile);
-        active = profile;
+        remember(name, profile);
         await widenScope(profiles);
         ctx.ui.notify(`Switched to ${name}`, "info");
       } catch (error) {
