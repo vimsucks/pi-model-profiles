@@ -177,7 +177,7 @@ export default function (pi: ExtensionAPI) {
     if (!active) return;
     const input = event.input as unknown as Config;
     if (event.toolName === "subagent") {
-      if (!input.model) input.model = active.eco;
+      if (input.action === undefined && !input.model) input.model = active.eco;
       return;
     }
     if (event.toolName === "fetch_content" && input.mode === "answer" && !input.answerModel) {

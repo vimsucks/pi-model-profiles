@@ -144,6 +144,23 @@ test("tool calls use the Eco model of the active profile", async () => {
   assert.equal(readable.answerModel, undefined);
 });
 
+test("resumed profiles leave subagent management calls unchanged", async () => {
+  const run = session({
+    branch: [{ type: "custom", customType: "model-profile", data: { name: "gpt", sport: "p/gpt-big", eco: "p/gpt-small" } }],
+  });
+  await run.start("resume");
+
+  for (const action of ["resume", "steer", "status", "guide"]) {
+    const input = { action, id: "child-1", message: "Continue" };
+    assert.equal(await run.toolCall("subagent", input), undefined);
+    assert.deepEqual(input, { action, id: "child-1", message: "Continue" });
+  }
+
+  const execution: Record<string, unknown> = { agent: "scout", task: "Inspect the repository" };
+  await run.toolCall("subagent", execution);
+  assert.equal(execution.model, "p/gpt-small");
+});
+
 test("a new profile is stored, applied and widens the subagent allowlist", async () => {
   const branch: { type: string; customType?: string; data?: unknown }[] = [];
   await write("model-profiles.json", {});

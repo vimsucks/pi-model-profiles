@@ -39,7 +39,8 @@ The command never writes `settings.json`, `web-search.json`, or any other packag
 - On `session_start` for a new or initial session with no saved profile, the default profile is applied through `pi.setModel()`. A starting model that differs from the configured default means an explicit override such as `--model`, and the extension leaves it alone.
 - Each successful profile selection saves its name and Sport/Eco snapshot in a session-local `model-profile` entry. These entries are excluded from model context. Reload, resume, fork, and tree navigation restore the latest valid snapshot on the active branch without changing the current main model. Editing or deleting the shared profile definition does not change an existing snapshot.
 - A new session with no saved selection uses the default profile. Sessions created before this persistence support need one successful `/profiles` selection before reload can restore their profile.
-- On `tool_call`, a `subagent` call without a `model` gets the Eco model, and a `fetch_content` call in `answer` mode without `answerModel` gets the Eco model. An explicit model on the call always wins.
+- On `tool_call`, a `subagent` execution call with neither `action` nor `model` gets the Eco model. A `fetch_content` call in `answer` mode without `answerModel` gets the Eco model. An explicit model on the call always wins.
+- Subagent management calls that specify `action` do not receive an injected model. This avoids overriding the persisted child model on `action: "resume"`.
 - Session naming, pi-background-tasks, and the Pi status line read the current session model, so they follow the profile without any extra configuration.
 
 ## Boundary
