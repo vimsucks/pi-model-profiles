@@ -1,5 +1,6 @@
 import { readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
   getAgentDir,
   type ExtensionAPI,
@@ -8,11 +9,16 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 type Config = Record<string, any>;
-type Profile = { sport: string; eco: string };
+type Profile = { sport: string; eco: string; sportThinking?: ModelThinkingLevel; ecoThinking?: ModelThinkingLevel };
 type Profiles = Record<string, Profile>;
 
 const NEW_PROFILE = "+ New profile…";
 const SET_DEFAULT = "★ Set as default profile";
+const NO_THINKING_OVERRIDE = "Do not override";
+
+function thinkingOf(value: unknown): ModelThinkingLevel | undefined {
+  return (["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const).find((level) => level === value);
+}
 
 function paths() {
   const agentDir = getAgentDir();
@@ -73,6 +79,8 @@ async function activate(pi: ExtensionAPI, ctx: ExtensionContext, profile: Profil
   const model = findModel(ctx, profile.sport);
   if (!model) throw new Error(`${profile.sport} is not an available model`);
   if (!await pi.setModel(model)) throw new Error(`Cannot switch to ${profile.sport}; check the provider authentication`);
+  const thinking = thinkingOf(profile.sportThinking);
+  if (thinking) pi.setThinkingLevel(thinking);
 }
 
 /**
@@ -94,7 +102,8 @@ async function createProfile(ctx: ExtensionCommandContext, profiles: Profiles) {
   const models = ctx.modelRegistry.getAvailable();
   if (!models.length) throw new Error("No model provider is available");
   const providers = [...new Set(models.map((model) => model.provider))].sort();
-  const pick = async (title: string, preferred?: string) => {
+  const pick = async (tier: "Sport" | "Eco", preferred?: string) => {
+    const title = tier === "Sport" ? "Sport (main session)" : "Eco (subagents and tools)";
     const ordered = preferred && providers.includes(preferred)
       ? [preferred, ...providers.filter((provider) => provider !== preferred)]
       : providers;
@@ -102,14 +111,20 @@ async function createProfile(ctx: ExtensionCommandContext, profiles: Profiles) {
     if (!provider) return undefined;
     const ids = models.filter((model) => model.provider === provider).map((model) => model.id).sort();
     const id = await ctx.ui.select(`${title} · ${provider}`, ids);
-    if (!id) return undefined;
-    return `${provider}/${id}`;
+    const model = models.find((model) => model.provider === provider && model.id === id);
+    if (!model) return undefined;
+    const reference = `${provider}/${id}`;
+    if (!model.reasoning) return { reference };
+    const selected = await ctx.ui.select(`${tier} thinking${tier === "Eco" ? " (subagents only)" : ""}`,
+      [NO_THINKING_OVERRIDE, ...getSupportedThinkingLevels(model)]);
+    if (selected === undefined) return undefined;
+    return { reference, thinking: thinkingOf(selected) };
   };
-  const sport = await pick("Sport (main session)");
+  const sport = await pick("Sport");
   if (!sport) return undefined;
-  const eco = await pick("Eco (subagents and tools)", providerOf(sport));
+  const eco = await pick("Eco", providerOf(sport.reference));
   if (!eco) return undefined;
-  const suggestion = `${providerOf(sport)}-${sport.slice(providerOf(sport).length + 1)}`;
+  const suggestion = `${providerOf(sport.reference)}-${sport.reference.slice(providerOf(sport.reference).length + 1)}`;
   for (;;) {
     const name = (await ctx.ui.input("Profile name", suggestion))?.trim();
     if (!name) return undefined;
@@ -121,7 +136,9 @@ async function createProfile(ctx: ExtensionCommandContext, profiles: Profiles) {
       ctx.ui.notify(`${name} already exists`, "warning");
       continue;
     }
-    return { name, profile: { sport, eco } };
+    return { name, profile: { sport: sport.reference, eco: eco.reference,
+      ...(sport.thinking ? { sportThinking: sport.thinking } : {}),
+      ...(eco.thinking ? { ecoThinking: eco.thinking } : {}) } };
   }
 }
 
@@ -129,19 +146,22 @@ export default function (pi: ExtensionAPI) {
   let active: Profile | undefined;
 
   const remember = (name: string, profile: Profile) => {
-    pi.appendEntry("model-profile", { name, sport: profile.sport, eco: profile.eco });
-    active = { ...profile };
+    const snapshot: Profile = { sport: profile.sport, eco: profile.eco,
+      sportThinking: thinkingOf(profile.sportThinking), ecoThinking: thinkingOf(profile.ecoThinking) };
+    pi.appendEntry("model-profile", { name, ...snapshot });
+    active = snapshot;
   };
 
   const restore = (ctx: ExtensionContext) => {
     active = undefined;
     for (const entry of ctx.sessionManager.getBranch().slice().reverse()) {
       if (entry.type !== "custom" || entry.customType !== "model-profile") continue;
-      const data = entry.data as { name?: unknown; sport?: unknown; eco?: unknown } | undefined;
+      const data = entry.data as Record<string, unknown> | undefined;
       if (!data || typeof data.name !== "string" || !data.name ||
           typeof data.sport !== "string" || !providerOf(data.sport) || data.sport.endsWith("/") ||
           typeof data.eco !== "string" || !providerOf(data.eco) || data.eco.endsWith("/")) continue;
-      active = { sport: data.sport, eco: data.eco };
+      active = { sport: data.sport, eco: data.eco,
+        sportThinking: thinkingOf(data.sportThinking), ecoThinking: thinkingOf(data.ecoThinking) };
       break;
     }
   };
@@ -167,7 +187,11 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       const model = findModel(ctx, profile.sport);
-      if (model && await pi.setModel(model)) remember(name, profile);
+      if (model && await pi.setModel(model)) {
+        const thinking = thinkingOf(profile.sportThinking);
+        if (thinking) pi.setThinkingLevel(thinking);
+        remember(name, profile);
+      }
     } catch {
       // A broken profile file must not break session startup.
     }
@@ -177,7 +201,9 @@ export default function (pi: ExtensionAPI) {
     if (!active) return;
     const input = event.input as unknown as Config;
     if (event.toolName === "subagent") {
-      if (input.action === undefined && !input.model) input.model = active.eco;
+      if (input.action === undefined && !input.model) {
+        input.model = active.ecoThinking ? `${active.eco}:${active.ecoThinking}` : active.eco;
+      }
       return;
     }
     if (event.toolName === "fetch_content" && input.mode === "answer" && !input.answerModel) {
@@ -220,11 +246,12 @@ export default function (pi: ExtensionAPI) {
           if (!created) return;
           const switchNow = await ctx.ui.confirm("Switch to this profile now?", created.name);
           const before = ctx.model;
+          const beforeThinking = pi.getThinkingLevel();
           if (switchNow) await activate(pi, ctx, created.profile);
           try {
             await save(files.profiles, { ...store, profiles: { ...profiles, [created.name]: created.profile } });
           } catch (error) {
-            if (switchNow && before) await pi.setModel(before);
+            if (switchNow && before && await pi.setModel(before)) pi.setThinkingLevel(beforeThinking);
             throw error;
           }
           if (switchNow) remember(created.name, created.profile);
